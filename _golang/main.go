@@ -4,15 +4,20 @@ import (
 	sql "database/sql"
 	"encoding/json"
 	"fmt"
-	pq "github.com/lib/pq"
 	"github.com/jackc/pgx"
+
+	pq "github.com/lib/pq"
+	// "github.com/pkg/profile"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"io/ioutil"
 	"log"
 	"math"
+	_ "net/http/pprof"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"time"
@@ -21,22 +26,19 @@ import (
 type ReportFunc func(int64, int64, int64, int64, []int64)
 type WorkerFunc func(time.Time, time.Duration, time.Duration,
 	string, []interface{},
-	*sync.WaitGroup, ReportFunc)
-
+	*sync.WaitGroup, ReportFunc, string)
 
 type TypeCaster func(interface{}) interface{}
 
-
 type CopyInfo struct {
 	TableName string
-	Columns	  []string
-	Types	  []TypeCaster
-	Rows	  [][]interface{}
+	Columns   []string
+	Types     []TypeCaster
+	Rows      [][]interface{}
 }
 
-
 func get_type_casters() map[string]TypeCaster {
-	cast_map := map[string] TypeCaster {
+	cast_map := map[string]TypeCaster{
 		"int4": func(v interface{}) interface{} {
 			i := int(v.(float64))
 			return i
@@ -54,6 +56,63 @@ func get_type_casters() map[string]TypeCaster {
 	return cast_map
 }
 
+func GetPgValueFunction(queryFile string) func(*pgx.Rows) {
+	var typrelid, typelem, typarray, typcategory, typdelim, i uint16
+
+	var typlen int16
+	var bool1, typispreferred, typisdefined bool
+	var byteObj1, byteObj2, byteObj3 []byte
+	var intArr []uint32
+
+	var copyA, copyB, copyC, copyF uint16
+	var copyD, copyG string
+	var copyE float64
+
+	base := filepath.Base(queryFile)
+
+	// var test []byte
+	switch base {
+	case "1-pg_type.json":
+		return func(rows *pgx.Rows) {
+			rows.Scan(&byteObj1, &byteObj2,
+				&byteObj3, &typlen, &bool1, &typcategory,
+				&typispreferred, &typisdefined, &typdelim,
+				&typrelid, &typelem, &typarray,
+			)
+		}
+	case "2-generate_series.json":
+		return func(rows *pgx.Rows) {
+			rows.Scan(&i)
+
+		}
+	case "3-large_object.json":
+		return func(rows *pgx.Rows) {
+			rows.Scan(&byteObj1)
+
+		}
+	case "4-arrays.json":
+		return func(rows *pgx.Rows) {
+			rows.Scan(&intArr)
+		}
+	case "5-copyfrom.json":
+		return func(rows *pgx.Rows) {
+			rows.Scan(&copyA,
+				&copyB,
+				&copyC,
+				&copyD,
+				&copyE,
+				&copyF,
+				&copyG)
+		}
+	default:
+		return func(rows *pgx.Rows) {
+			// Fallback
+			log.Println("using fallback.......")
+			rows.Values()
+		}
+	}
+
+}
 
 func get_copy_info(db *sql.DB, query string, args []interface{}) CopyInfo {
 	re := regexp.MustCompile(`COPY (\w+)\s*\(\s*((?:\w+)(?:,\s*\w+)*)\s*\)`)
@@ -67,7 +126,7 @@ func get_copy_info(db *sql.DB, query string, args []interface{}) CopyInfo {
 
 	col_parts := strings.Split(match[2], ",")
 	cols := make([]string, len(col_parts))
-	for i, cp := range(col_parts) {
+	for i, cp := range col_parts {
 		cols[i] = strings.Trim(cp, " ")
 	}
 
@@ -144,17 +203,16 @@ func get_copy_info(db *sql.DB, query string, args []interface{}) CopyInfo {
 
 	return CopyInfo{
 		TableName: table,
-		Columns: cols,
-		Types: casters,
-		Rows: copyrows,
+		Columns:   cols,
+		Types:     casters,
+		Rows:      copyrows,
 	}
 }
-
 
 func lib_pq_worker(
 	start time.Time, duration time.Duration, timeout time.Duration,
 	query string, query_args []interface{}, wg *sync.WaitGroup,
-	report ReportFunc) {
+	report ReportFunc, queryFile string) {
 
 	defer wg.Done()
 
@@ -244,7 +302,7 @@ func lib_pq_worker(
 				record = make([]interface{}, colcount)
 				recordPtr = make([]interface{}, colcount)
 
-				for i, _ := range record {
+				for i := range record {
 					recordPtr[i] = &record[i]
 				}
 			}
@@ -294,11 +352,14 @@ func lib_pq_worker(
 }
 
 func pgx_worker(
+
 	start time.Time, duration time.Duration, timeout time.Duration,
 	query string, query_args []interface{}, wg *sync.WaitGroup,
-	report ReportFunc) {
+	report ReportFunc, queryFile string) {
 
 	defer wg.Done()
+
+	scanFunc := GetPgValueFunction(queryFile)
 
 	conninfo := fmt.Sprintf(
 		"user=%s dbname=%s host=%s port=%d sslmode=disable",
@@ -334,9 +395,9 @@ func pgx_worker(
 			req_start := time.Now()
 
 			copy_count, err := db.CopyFrom(
-			    pgx.Identifier{copy.TableName},
-			    copy.Columns,
-			    pgx.CopyFromRows(copy.Rows),
+				pgx.Identifier{copy.TableName},
+				copy.Columns,
+				pgx.CopyFromRows(copy.Rows),
 			)
 
 			if err != nil {
@@ -382,7 +443,8 @@ func pgx_worker(
 			}
 			for havemore {
 				nrows += 1
-				_, err = rows.Values()
+				scanFunc(rows)
+				// rows.Values()
 				if err != nil {
 					log.Fatal(err)
 				}
@@ -445,11 +507,11 @@ var (
 	pgdatabase = app.Flag(
 		"pgdatabase", "database to connect to").Default("postgres").String()
 
-	driver = app.Arg(
-		"driver", "driver implementation to use").Required().Enum("libpq", "pgx")
-
 	queryfile = app.Arg(
 		"queryfile", "file to read benchmark query information from").Required().String()
+
+	driver = app.Arg(
+		"driver", "driver implementation to use").Default().Enum("libpq", "pgx")
 )
 
 type QueryInfo struct {
@@ -460,6 +522,13 @@ type QueryInfo struct {
 }
 
 func main() {
+
+	f, err := os.Create("cpu.profile")
+	defer f.Close()
+	pprof.StartCPUProfile(f)
+
+	defer pprof.StopCPUProfile()
+
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 
 	runtime.GOMAXPROCS(1)
@@ -543,7 +612,7 @@ func main() {
 
 		for i := 0; i < concurrency; i += 1 {
 			go worker(start, run_duration, timeout, query,
-				query_args, &wg, report)
+				query_args, &wg, report, *queryfile)
 		}
 
 		wg.Wait()

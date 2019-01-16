@@ -372,6 +372,7 @@ def run_benchmarks(args, variations, pghost, pgport, pguser):
     else:
         benchmarks_to_run = [re.compile(re.escape(b)) for b in BENCHMARKS]
 
+    print(benchmarks_to_run)
     mydir = os.path.dirname(os.path.realpath(__file__))
 
     benchmarks_data = []
@@ -416,6 +417,13 @@ def run_benchmarks(args, variations, pghost, pgport, pguser):
             cmdline = [runner] + runner_switches + \
                       ['--concurrency={}'.format(variation['concurrency'])] + \
                       [driver, variation['queryfile']]
+
+
+            if platform == 'golang':
+                cmdline = [runner] + runner_switches + \
+                          ['--concurrency={}'.format(variation['concurrency'])] + \
+                          [variation['queryfile'], driver]
+
             print(' '.join(cmdline))
 
             runner_proc = subprocess.run(

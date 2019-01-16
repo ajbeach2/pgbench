@@ -91,7 +91,9 @@ async def asyncpg_connect(args):
 
 
 async def asyncpg_execute(conn, query, args):
-    return len(await conn.fetch(query, *args))
+    rows = await conn.fetch(query, *args)
+    [value for value in rows.values()]
+    return len(rows)
 
 
 async def asyncpg_copy(conn, query, args):
